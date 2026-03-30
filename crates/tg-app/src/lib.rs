@@ -1,11 +1,15 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use tg_core::{
     AppConfigHints, TelegramRuleError, TransferFeatureConfig, TransferJob, TransferPlan,
 };
 use tg_tdlib::{
-    TdlibBootstrapConfig, TdlibBootstrapPreview, TdlibProbe, TdlibRuntimeError,
-    TdlibTransferPreview, TransferIntegration, bootstrap_preview, probe_tdjson, transfer_preview,
+    LiveTdlibBridgeResult, TdjsonSession, TdlibBootstrapConfig, TdlibBootstrapPreview, TdlibProbe,
+    TdlibRuntimeError, TdlibTransferPreview, TransferIntegration, bootstrap_preview, probe_tdjson,
+    transfer_preview,
 };
 use tg_transfer::TransferPlanner;
 
@@ -37,6 +41,16 @@ pub struct RewriteService {
     planner: TransferPlanner,
     tdlib: TdlibBootstrapConfig,
     transfer: TransferIntegration,
+}
+
+#[derive(Debug, Error)]
+pub enum LiveBridgeError {
+    #[error(transparent)]
+    Plan(#[from] TelegramRuleError),
+    #[error(transparent)]
+    Tdlib(#[from] TdlibRuntimeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl Default for RewriteService {
@@ -87,6 +101,29 @@ impl RewriteService {
         file_id: i32,
     ) -> TdlibTransferPreview {
         transfer_preview(local_path, chat_id, file_id)
+    }
+
+    pub fn bridge_logged_in_download(
+        &self,
+        job: &TransferJob,
+        file_id: i32,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<LiveTdlibBridgeResult, LiveBridgeError> {
+        let plan = self.plan_transfer(job)?;
+        let mut session = TdjsonSession::connect(&self.tdlib)?;
+        Ok(session.bridge_download(file_id, chat_id, message_id, plan)?)
+    }
+
+    pub fn bridge_logged_in_upload(
+        &self,
+        local_path: impl AsRef<Path>,
+        job: &TransferJob,
+        chat_id: i64,
+    ) -> Result<LiveTdlibBridgeResult, LiveBridgeError> {
+        let plan = self.plan_transfer(job)?;
+        let mut session = TdjsonSession::connect(&self.tdlib)?;
+        Ok(session.bridge_upload(&local_path.as_ref().to_string_lossy(), chat_id, plan)?)
     }
 
     pub fn manifest(&self) -> ProjectManifest {

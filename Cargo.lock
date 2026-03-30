@@ -2928,6 +2928,7 @@ dependencies = [
  "tg-core",
  "tg-tdlib",
  "tg-transfer",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2971,6 +2972,7 @@ dependencies = [
  "serde_json",
  "tg-core",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

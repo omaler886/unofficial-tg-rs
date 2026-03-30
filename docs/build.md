@@ -14,6 +14,8 @@ Useful entry points:
 ```powershell
 cargo run -p tg-cli -- manifest
 cargo run -p tg-cli -- tdlib-probe --tdjson vendor/tdlib/tdjson.dll
+cargo run -p tg-cli -- bridge-download --tdjson vendor/tdlib/tdjson.dll --file-id 123 --chat-id 0 --size 8388608
+cargo run -p tg-cli -- bridge-upload --tdjson vendor/tdlib/tdjson.dll --path .\sample.bin --chat-id 123456789
 cargo run -p tg-desktop
 ```
 
@@ -75,6 +77,7 @@ What you can do in the app:
 - issue a real `getAuthorizationState` request through TDLib
 - preview `setTdlibParameters`
 - preview `downloadFile`, `addFileToDownloads`, `preliminaryUploadFile`, and `sendMessage` document requests
+- bridge acceleration plans into a real logged-in TDLib session
 - generate acceleration plans for upload and download work
 
 ## 4. Notes
@@ -82,3 +85,4 @@ What you can do in the app:
 - The current desktop app is a development shell, not a finished Telegram client.
 - Real login still requires your own `api_id` and `api_hash` from <https://my.telegram.org>.
 - The TDLib JSON interface is the intended bridge for this Rust rewrite because TDLib officially recommends the JSON interface for languages that can call C functions.
+- The new `bridge-download` and `bridge-upload` commands assume the TDLib session is already logged in and that the configured TDLib database points to that existing session.

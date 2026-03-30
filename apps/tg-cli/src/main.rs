@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tg_app::RewriteService;
@@ -30,6 +30,36 @@ enum Command {
     TdlibProbe {
         #[arg(long)]
         tdjson: Option<String>,
+    },
+    BridgeDownload {
+        #[arg(long)]
+        tdjson: Option<String>,
+        #[arg(long)]
+        file_id: i32,
+        #[arg(long, default_value_t = 0)]
+        chat_id: i64,
+        #[arg(long, default_value_t = 0)]
+        message_id: i64,
+        #[arg(long)]
+        size: u64,
+        #[arg(long, default_value = "download.bin")]
+        name: String,
+        #[arg(long, value_enum, default_value = "balanced")]
+        policy: PolicyArg,
+        #[arg(long, default_value_t = false)]
+        premium: bool,
+    },
+    BridgeUpload {
+        #[arg(long)]
+        tdjson: Option<String>,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        chat_id: i64,
+        #[arg(long, value_enum, default_value = "balanced")]
+        policy: PolicyArg,
+        #[arg(long, default_value_t = false)]
+        premium: bool,
     },
     Plan {
         #[arg(long, value_enum)]
@@ -103,21 +133,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::TdlibProbe { tdjson } => {
-            let service = if let Some(tdjson) = tdjson {
-                RewriteService::new(
-                    TransferFeatureConfig::default(),
-                    AppConfigHints::default(),
-                    TdlibBootstrapConfig {
-                        custom_tdjson_path: Some(tdjson.into()),
-                        ..Default::default()
-                    },
-                    Default::default(),
-                )
-            } else {
-                RewriteService::default()
-            };
+            let service = service_from(PolicyArg::Balanced, tdjson);
 
             let result = service.probe_tdlib()?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::BridgeDownload {
+            tdjson,
+            file_id,
+            chat_id,
+            message_id,
+            size,
+            name,
+            policy,
+            premium,
+        } => {
+            let service = service_from(policy, tdjson);
+            let transfer_job = job(name, size, DirectionArg::Download, premium);
+            let result =
+                service.bridge_logged_in_download(&transfer_job, file_id, chat_id, message_id)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::BridgeUpload {
+            tdjson,
+            path,
+            chat_id,
+            policy,
+            premium,
+        } => {
+            let metadata = std::fs::metadata(&path)?;
+            let service = service_from(policy, tdjson);
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("upload.bin")
+                .to_string();
+            let transfer_job = TransferJob::new(
+                file_name,
+                metadata.len(),
+                TransferDirection::Upload,
+                if premium {
+                    AccountTier::Premium
+                } else {
+                    AccountTier::Free
+                },
+            );
+            let result = service.bridge_logged_in_upload(&path, &transfer_job, chat_id)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Plan {
@@ -194,6 +255,21 @@ fn planner_from(
             large_queue_max_active_operations_count: large_queue_limit,
             ..Default::default()
         },
+    )
+}
+
+fn service_from(policy: PolicyArg, tdjson: Option<String>) -> RewriteService {
+    RewriteService::new(
+        TransferFeatureConfig {
+            policy: policy.into(),
+            ..Default::default()
+        },
+        AppConfigHints::default(),
+        TdlibBootstrapConfig {
+            custom_tdjson_path: tdjson.map(Into::into),
+            ..Default::default()
+        },
+        Default::default(),
     )
 }
 

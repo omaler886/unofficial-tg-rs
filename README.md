@@ -40,6 +40,8 @@ See [docs/research.md](D:\New project\unofficial-tg-rs\docs\research.md) for the
 
 ```powershell
 cargo run -p tg-cli -- manifest
+cargo run -p tg-cli -- tdlib-probe --tdjson vendor/tdlib/tdjson.dll
+cargo run -p tg-cli -- bridge-download --tdjson vendor/tdlib/tdjson.dll --file-id 123 --chat-id 0 --size 8388608
 cargo run -p tg-cli -- plan --direction upload --size 1610612736 --policy aggressive --premium
 cargo run -p tg-cli -- simulate --direction download --size 8388608 --policy balanced
 cargo run -p tg-desktop
@@ -76,6 +78,13 @@ cargo run -p tg-desktop
 ```
 
 If you also want live TDLib probing from the desktop app, build `tdjson.dll` and place it at `vendor/tdlib/tdjson.dll`. The app also checks `tdjson.dll` in the current directory and `bin/tdjson.dll`.
+
+For real bridge operations against an already logged-in TDLib session, reuse the same TDLib database/files directories and then call:
+
+```powershell
+cargo run -p tg-cli -- bridge-download --tdjson vendor/tdlib/tdjson.dll --file-id 123 --chat-id 0 --size 8388608
+cargo run -p tg-cli -- bridge-upload --tdjson vendor/tdlib/tdjson.dll --path .\sample.bin --chat-id 123456789
+```
 
 ## Naming note
 

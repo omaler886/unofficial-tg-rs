@@ -4,10 +4,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use std::{fmt, mem};
 
 use libloading::Library;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tg_core::{TransferDirection, TransferPlan};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +119,62 @@ pub struct TdlibProbe {
     pub auth_messages: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationState {
+    WaitTdlibParameters,
+    WaitEncryptionKey,
+    WaitPhoneNumber,
+    WaitCode,
+    WaitPassword,
+    WaitRegistration,
+    WaitOtherDeviceConfirmation,
+    Ready,
+    LoggingOut,
+    Closing,
+    Closed,
+    Unknown(String),
+}
+
+impl AuthorizationState {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+impl fmt::Display for AuthorizationState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WaitTdlibParameters => write!(f, "authorizationStateWaitTdlibParameters"),
+            Self::WaitEncryptionKey => write!(f, "authorizationStateWaitEncryptionKey"),
+            Self::WaitPhoneNumber => write!(f, "authorizationStateWaitPhoneNumber"),
+            Self::WaitCode => write!(f, "authorizationStateWaitCode"),
+            Self::WaitPassword => write!(f, "authorizationStateWaitPassword"),
+            Self::WaitRegistration => write!(f, "authorizationStateWaitRegistration"),
+            Self::WaitOtherDeviceConfirmation => {
+                write!(f, "authorizationStateWaitOtherDeviceConfirmation")
+            }
+            Self::Ready => write!(f, "authorizationStateReady"),
+            Self::LoggingOut => write!(f, "authorizationStateLoggingOut"),
+            Self::Closing => write!(f, "authorizationStateClosing"),
+            Self::Closed => write!(f, "authorizationStateClosed"),
+            Self::Unknown(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveTdlibBridgeResult {
+    pub library_path: PathBuf,
+    pub authorization_state: AuthorizationState,
+    pub priority: i32,
+    pub plan: TransferPlan,
+    pub primary_request: Value,
+    pub primary_response: Option<Value>,
+    pub follow_up_requests: Vec<Value>,
+    pub follow_up_responses: Vec<Option<Value>>,
+}
+
 #[derive(Debug, Error)]
 pub enum TdlibRuntimeError {
     #[error("tdjson was not found in the configured candidate paths")]
@@ -131,6 +189,12 @@ pub enum TdlibRuntimeError {
     InvalidUtf8,
     #[error("tdjson returned invalid JSON: {0}")]
     InvalidJson(String),
+    #[error("tdlib request must be a JSON object")]
+    NonObjectRequest,
+    #[error("timed out waiting for TDLib response with extra {extra}")]
+    ResponseTimeout { extra: String },
+    #[error("tdlib session is not authorized: {state}")]
+    AuthNotReady { state: AuthorizationState },
 }
 
 type TdJsonClientCreateFn = unsafe extern "C" fn() -> *mut c_void;
@@ -243,6 +307,181 @@ impl Drop for TdjsonClient {
     }
 }
 
+pub struct TdjsonSession {
+    client: TdjsonClient,
+    backlog: Vec<Value>,
+    request_seq: u64,
+    library_path: PathBuf,
+}
+
+impl TdjsonSession {
+    pub fn connect(config: &TdlibBootstrapConfig) -> Result<Self, TdlibRuntimeError> {
+        let path = discover_tdjson(config)?;
+        let api = TdjsonApi::load(&path)?;
+        let client = api.create_client();
+        Ok(Self {
+            client,
+            backlog: Vec::new(),
+            request_seq: 0,
+            library_path: path,
+        })
+    }
+
+    pub fn library_path(&self) -> &Path {
+        &self.library_path
+    }
+
+    pub fn authorization_state(&mut self) -> Result<AuthorizationState, TdlibRuntimeError> {
+        let request = tdlib_requests::get_authorization_state("authorization-state");
+        let response = self.request(request, Duration::from_secs(2))?;
+        Ok(authorization_state_from_value(
+            response.as_ref().unwrap_or(&Value::Null),
+        ))
+    }
+
+    pub fn request(
+        &mut self,
+        request: Value,
+        timeout: Duration,
+    ) -> Result<Option<Value>, TdlibRuntimeError> {
+        let (extra, tagged) = self.tag_request(request)?;
+        self.client.send(&tagged)?;
+        self.wait_for_extra(&extra, timeout)
+    }
+
+    pub fn poll_updates(
+        &mut self,
+        timeout: Duration,
+        max_messages: usize,
+    ) -> Result<Vec<Value>, TdlibRuntimeError> {
+        let mut updates = mem::take(&mut self.backlog);
+        let mut fresh = self.client.receive_batch(timeout, max_messages)?;
+        updates.append(&mut fresh);
+        Ok(updates)
+    }
+
+    pub fn bridge_download(
+        &mut self,
+        file_id: i32,
+        chat_id: i64,
+        message_id: i64,
+        plan: TransferPlan,
+    ) -> Result<LiveTdlibBridgeResult, TdlibRuntimeError> {
+        if plan.direction != TransferDirection::Download {
+            return Err(TdlibRuntimeError::NonObjectRequest);
+        }
+        let authorization_state = self.authorization_state()?;
+        if !authorization_state.is_ready() {
+            return Err(TdlibRuntimeError::AuthNotReady {
+                state: authorization_state,
+            });
+        }
+
+        let priority = tdlib_priority_from_plan(&plan);
+        let primary_request = tdlib_requests::download_file(file_id, priority, 0, 0, false);
+        let primary_response = self.request(primary_request.clone(), Duration::from_secs(3))?;
+
+        let follow_up_requests = vec![tdlib_requests::add_file_to_downloads(
+            file_id, chat_id, message_id, priority,
+        )];
+        let follow_up_responses = follow_up_requests
+            .iter()
+            .cloned()
+            .map(|request| self.request(request, Duration::from_secs(3)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(LiveTdlibBridgeResult {
+            library_path: self.library_path.clone(),
+            authorization_state,
+            priority,
+            plan,
+            primary_request,
+            primary_response,
+            follow_up_requests,
+            follow_up_responses,
+        })
+    }
+
+    pub fn bridge_upload(
+        &mut self,
+        local_path: &str,
+        chat_id: i64,
+        plan: TransferPlan,
+    ) -> Result<LiveTdlibBridgeResult, TdlibRuntimeError> {
+        if plan.direction != TransferDirection::Upload {
+            return Err(TdlibRuntimeError::NonObjectRequest);
+        }
+        let authorization_state = self.authorization_state()?;
+        if !authorization_state.is_ready() {
+            return Err(TdlibRuntimeError::AuthNotReady {
+                state: authorization_state,
+            });
+        }
+
+        let priority = tdlib_priority_from_plan(&plan);
+        let primary_request = tdlib_requests::preliminary_upload_file(local_path, priority);
+        let primary_response = self.request(primary_request.clone(), Duration::from_secs(3))?;
+
+        let follow_up_requests = vec![tdlib_requests::send_document_message(chat_id, local_path)];
+        let follow_up_responses = follow_up_requests
+            .iter()
+            .cloned()
+            .map(|request| self.request(request, Duration::from_secs(3)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(LiveTdlibBridgeResult {
+            library_path: self.library_path.clone(),
+            authorization_state,
+            priority,
+            plan,
+            primary_request,
+            primary_response,
+            follow_up_requests,
+            follow_up_responses,
+        })
+    }
+
+    fn tag_request(&mut self, mut request: Value) -> Result<(String, Value), TdlibRuntimeError> {
+        let extra = format!("codex-{}", self.request_seq);
+        self.request_seq += 1;
+        let object = request
+            .as_object_mut()
+            .ok_or(TdlibRuntimeError::NonObjectRequest)?;
+        object.insert("@extra".to_string(), Value::String(extra.clone()));
+        Ok((extra, request))
+    }
+
+    fn wait_for_extra(
+        &mut self,
+        extra: &str,
+        timeout: Duration,
+    ) -> Result<Option<Value>, TdlibRuntimeError> {
+        if let Some(index) = self
+            .backlog
+            .iter()
+            .position(|message| message_extra(message) == Some(extra))
+        {
+            return Ok(Some(self.backlog.remove(index)));
+        }
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let wait = remaining.min(Duration::from_millis(200));
+            match self.client.receive(wait)? {
+                Some(message) if message_extra(&message) == Some(extra) => {
+                    return Ok(Some(message));
+                }
+                Some(message) => self.backlog.push(message),
+                None => {}
+            }
+        }
+        Err(TdlibRuntimeError::ResponseTimeout {
+            extra: extra.to_string(),
+        })
+    }
+}
+
 pub fn discover_tdjson(config: &TdlibBootstrapConfig) -> Result<PathBuf, TdlibRuntimeError> {
     config
         .library_candidates()
@@ -277,6 +516,7 @@ pub fn bootstrap_preview(config: &TdlibBootstrapConfig) -> TdlibBootstrapPreview
         requests: vec![
             tdlib_requests::set_log_verbosity_level(1),
             tdlib_requests::set_tdlib_parameters(config),
+            tdlib_requests::check_database_encryption_key(),
             tdlib_requests::get_authorization_state("bootstrap-state"),
         ],
     }
@@ -347,6 +587,45 @@ fn parse_json_ptr(ptr: *const c_char) -> Result<Option<Value>, TdlibRuntimeError
         .map_err(|error| TdlibRuntimeError::InvalidJson(error.to_string()))
 }
 
+fn message_extra(value: &Value) -> Option<&str> {
+    value.get("@extra").and_then(Value::as_str)
+}
+
+fn authorization_state_from_value(value: &Value) -> AuthorizationState {
+    let current = if value.get("@type").and_then(Value::as_str) == Some("updateAuthorizationState")
+    {
+        value.get("authorization_state").unwrap_or(value)
+    } else {
+        value
+    };
+
+    match current.get("@type").and_then(Value::as_str) {
+        Some("authorizationStateWaitTdlibParameters") => AuthorizationState::WaitTdlibParameters,
+        Some("authorizationStateWaitEncryptionKey") => AuthorizationState::WaitEncryptionKey,
+        Some("authorizationStateWaitPhoneNumber") => AuthorizationState::WaitPhoneNumber,
+        Some("authorizationStateWaitCode") => AuthorizationState::WaitCode,
+        Some("authorizationStateWaitPassword") => AuthorizationState::WaitPassword,
+        Some("authorizationStateWaitRegistration") => AuthorizationState::WaitRegistration,
+        Some("authorizationStateWaitOtherDeviceConfirmation") => {
+            AuthorizationState::WaitOtherDeviceConfirmation
+        }
+        Some("authorizationStateReady") => AuthorizationState::Ready,
+        Some("authorizationStateLoggingOut") => AuthorizationState::LoggingOut,
+        Some("authorizationStateClosing") => AuthorizationState::Closing,
+        Some("authorizationStateClosed") => AuthorizationState::Closed,
+        Some(other) => AuthorizationState::Unknown(other.to_string()),
+        None => AuthorizationState::Unknown("unknown".to_string()),
+    }
+}
+
+pub fn tdlib_priority_from_plan(plan: &TransferPlan) -> i32 {
+    let base = match plan.direction {
+        TransferDirection::Download => 8,
+        TransferDirection::Upload => 10,
+    };
+    (base + (plan.worker_count as i32 * 3) + plan.parallel_file_budget as i32).clamp(1, 32)
+}
+
 pub mod tdlib_requests {
     use serde_json::{Value, json};
 
@@ -370,6 +649,13 @@ pub mod tdlib_requests {
         json!({
             "@type": "getAuthorizationState",
             "@extra": extra
+        })
+    }
+
+    pub fn check_database_encryption_key() -> Value {
+        json!({
+            "@type": "checkDatabaseEncryptionKey",
+            "encryption_key": ""
         })
     }
 
@@ -432,7 +718,9 @@ pub mod tdlib_requests {
                 "@type": "inputFileLocal",
                 "path": local_path
             },
-            "file_type": Value::Null,
+            "file_type": {
+                "@type": "fileTypeDocument"
+            },
             "priority": priority
         })
     }
@@ -460,5 +748,52 @@ pub mod tdlib_requests {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tg_core::TransferPlan;
+    use uuid::Uuid;
+
+    use super::{AuthorizationState, authorization_state_from_value, tdlib_priority_from_plan};
+
+    #[test]
+    fn authorization_state_parser_handles_direct_and_update_forms() {
+        let direct = json!({ "@type": "authorizationStateReady" });
+        let update = json!({
+            "@type": "updateAuthorizationState",
+            "authorization_state": { "@type": "authorizationStateWaitPhoneNumber" }
+        });
+
+        assert_eq!(
+            authorization_state_from_value(&direct),
+            AuthorizationState::Ready
+        );
+        assert_eq!(
+            authorization_state_from_value(&update),
+            AuthorizationState::WaitPhoneNumber
+        );
+    }
+
+    #[test]
+    fn tdlib_priority_stays_in_valid_range() {
+        let plan = TransferPlan {
+            job_id: Uuid::nil(),
+            direction: tg_core::TransferDirection::Download,
+            part_size: 1024 * 1024,
+            total_parts: 1024,
+            worker_count: 8,
+            parallel_file_budget: 2,
+            big_file_api: false,
+            needs_md5_for_finalize: false,
+            verify_hashes: true,
+            allow_cdn: true,
+            notes: Vec::new(),
+        };
+
+        let priority = tdlib_priority_from_plan(&plan);
+        assert!((1..=32).contains(&priority));
     }
 }

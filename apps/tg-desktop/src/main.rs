@@ -27,6 +27,7 @@ struct DesktopApp {
     bootstrap_json: String,
     transfer_json: String,
     probe_json: String,
+    bridge_json: String,
     status_line: String,
 }
 
@@ -53,6 +54,7 @@ impl Default for DesktopApp {
             bootstrap_json,
             transfer_json,
             probe_json: String::new(),
+            bridge_json: String::new(),
             status_line: "Desktop shell ready. Add tdjson.dll to vendor/tdlib to enable probing."
                 .to_string(),
         }
@@ -114,7 +116,11 @@ impl eframe::App for DesktopApp {
             if ui.button("Generate Transfer Plan").clicked() {
                 self.generate_plan();
             }
+            if ui.button("Bridge Into Logged-in TDLib Session").clicked() {
+                self.bridge_live_tdlib();
+            }
             read_only_json(ui, "Plan Output", &mut self.plan_json);
+            read_only_json(ui, "Bridge Output", &mut self.bridge_json);
 
             ui.separator();
             ui.heading("TDLib Request Preview");
@@ -181,6 +187,57 @@ impl DesktopApp {
             file_id,
         ))
         .unwrap_or_else(|error| format!("{{\"error\":\"{}\"}}", error));
+    }
+
+    fn bridge_live_tdlib(&mut self) {
+        let Ok(total_bytes) = self.total_bytes.parse::<u64>() else {
+            self.bridge_json = "{\"error\":\"invalid size\"}".to_string();
+            return;
+        };
+        let chat_id = self.chat_id.parse::<i64>().unwrap_or_default();
+        let file_id = self.file_id.parse::<i32>().unwrap_or_default();
+
+        let service = RewriteService::new(
+            TransferFeatureConfig {
+                policy: self.policy,
+                ..Default::default()
+            },
+            Default::default(),
+            self.service.tdlib_config().clone(),
+            Default::default(),
+        );
+
+        let job = TransferJob::new(
+            self.file_name.clone(),
+            total_bytes,
+            self.direction,
+            if self.premium {
+                AccountTier::Premium
+            } else {
+                AccountTier::Free
+            },
+        );
+
+        let result = match self.direction {
+            TransferDirection::Download => service
+                .bridge_logged_in_download(&job, file_id, chat_id, 0)
+                .map_err(|error| error.to_string()),
+            TransferDirection::Upload => service
+                .bridge_logged_in_upload(&self.upload_path, &job, chat_id)
+                .map_err(|error| error.to_string()),
+        };
+
+        match result {
+            Ok(value) => {
+                self.bridge_json = serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|error| format!("{{\"error\":\"{}\"}}", error));
+                self.status_line = "Live TDLib bridge request queued.".to_string();
+            }
+            Err(error) => {
+                self.bridge_json = format!("{{\"error\":\"{}\"}}", error);
+                self.status_line = format!("Live bridge failed: {}", error);
+            }
+        }
     }
 }
 
