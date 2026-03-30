@@ -1,0 +1,10 @@
+[package]
+name = "tg-tdlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tg-core = { path = "../tg-core" }

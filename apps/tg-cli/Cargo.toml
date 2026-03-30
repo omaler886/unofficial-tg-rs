@@ -1,0 +1,13 @@
+[package]
+name = "tg-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tg-app = { path = "../../crates/tg-app" }
+tg-core = { path = "../../crates/tg-core" }
+tg-transfer = { path = "../../crates/tg-transfer" }
