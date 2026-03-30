@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use tg_core::{
     AppConfigHints, TelegramRuleError, TransferFeatureConfig, TransferJob, TransferPlan,
 };
-use tg_tdlib::{TdlibBootstrapConfig, TransferIntegration};
+use tg_tdlib::{
+    TdlibBootstrapConfig, TdlibBootstrapPreview, TdlibProbe, TdlibRuntimeError,
+    TdlibTransferPreview, TransferIntegration, bootstrap_preview, probe_tdjson, transfer_preview,
+};
 use tg_transfer::TransferPlanner;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +66,27 @@ impl RewriteService {
 
     pub fn plan_transfer(&self, job: &TransferJob) -> Result<TransferPlan, TelegramRuleError> {
         self.planner.plan(job)
+    }
+
+    pub fn tdlib_config(&self) -> &TdlibBootstrapConfig {
+        &self.tdlib
+    }
+
+    pub fn probe_tdlib(&self) -> Result<TdlibProbe, TdlibRuntimeError> {
+        probe_tdjson(&self.tdlib)
+    }
+
+    pub fn tdlib_bootstrap_preview(&self) -> TdlibBootstrapPreview {
+        bootstrap_preview(&self.tdlib)
+    }
+
+    pub fn tdlib_transfer_preview(
+        &self,
+        local_path: impl Into<String>,
+        chat_id: i64,
+        file_id: i32,
+    ) -> TdlibTransferPreview {
+        transfer_preview(local_path, chat_id, file_id)
     }
 
     pub fn manifest(&self) -> ProjectManifest {

@@ -5,6 +5,7 @@ members = [
     "crates/tg-tdlib",
     "crates/tg-app",
     "apps/tg-cli",
+    "apps/tg-desktop",
 ]
 resolver = "2"
 
@@ -16,6 +17,8 @@ version = "0.1.0"
 [workspace.dependencies]
 async-trait = "0.1.89"
 clap = { version = "4.5.53", features = ["derive"] }
+eframe = "0.33.0"
+libloading = "0.8.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"

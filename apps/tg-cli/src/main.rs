@@ -6,6 +6,7 @@ use tg_core::{
     AccelerationPolicy, AccountTier, AppConfigHints, TransferDirection, TransferFeatureConfig,
     TransferJob,
 };
+use tg_tdlib::TdlibBootstrapConfig;
 use tg_transfer::{
     MemoryDownloadBackend, MemoryDownloadSink, MemoryUploadSource, ParallelDownloadEngine,
     ParallelUploadEngine, RecordingUploadBackend, TransferPlanner,
@@ -16,7 +17,7 @@ const MAX_SIMULATION_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Parser)]
 #[command(
     name = "tg-cli",
-    about = "Rust rewrite companion CLI for planning and simulating Telegram transfer acceleration"
+    about = "Rust rewrite companion CLI for planning, TDLib probing, and simulating Telegram transfer acceleration"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,6 +27,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Manifest,
+    TdlibProbe {
+        #[arg(long)]
+        tdjson: Option<String>,
+    },
     Plan {
         #[arg(long, value_enum)]
         direction: DirectionArg,
@@ -96,6 +101,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Manifest => {
             let manifest = RewriteService::default().manifest();
             println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::TdlibProbe { tdjson } => {
+            let service = if let Some(tdjson) = tdjson {
+                RewriteService::new(
+                    TransferFeatureConfig::default(),
+                    AppConfigHints::default(),
+                    TdlibBootstrapConfig {
+                        custom_tdjson_path: Some(tdjson.into()),
+                        ..Default::default()
+                    },
+                    Default::default(),
+                )
+            } else {
+                RewriteService::default()
+            };
+
+            let result = service.probe_tdlib()?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Plan {
             direction,
